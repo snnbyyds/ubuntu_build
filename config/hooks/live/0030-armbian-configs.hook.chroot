@@ -1,0 +1,12 @@
+#!/bin/bash
+
+cat >> /etc/sysctl.conf << 'SYSCTLEOF'
+vm.swappiness=1
+vm.vfs_cache_pressure=50
+vm.dirty_background_ratio=1
+vm.dirty_ratio=50
+kernel.nmi_watchdog=0
+net.ipv4.tcp_congestion_control=bbr
+SYSCTLEOF
+
+apt-get install -y htop tree ncdu iotop nethogs

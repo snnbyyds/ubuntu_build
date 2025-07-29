@@ -1,0 +1,11 @@
+config/archives
+config/hooks/live/0020-local-packages.hook.chroot
+config/hooks/live/0030-armbian-configs.hook.chroot
+config/hooks/normal/0010-import-keys.hook.chroot
+config/hooks/normal/0030-system-config.hook.chroot
+config/hooks/normal/0040-gnome-config.hook.chroot
+config/hooks/normal/0050-prune-gnome.hook.chroot
+config/hooks/normal/0070-clean-rubbish.hook.chroot
+config/hooks/normal/0080-initramfs-gzip.hook.chroot
+config/includes.chroot
+config/package-lists/ubuntu.list.chroot

@@ -1,0 +1,21 @@
+#!/bin/bash
+set -e
+apt-get purge -y gnome-mines gnome-sudoku empathy totem rhythmbox libreoffice* firefox*
+apt-get purge -y gnome-accessibility-themes \
+    gnome-bluetooth-sendto \
+    gnome-initial-setup \
+    gnome-font-viewer \
+    gnome-clocks \
+    gnome-logs \
+    gnome-remote-desktop \
+    gnome-system-monitor \
+    gnome-text-editor \
+    printer-driver-* \
+    papers \
+    orca \
+    packagekit \
+    avahi-daemon \
+    whoopsie \
+    firefox \
+    cloud-init
+apt autoremove --purge -y

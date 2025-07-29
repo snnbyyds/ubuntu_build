@@ -1,0 +1,8 @@
+#!/bin/bash
+
+wget -qO- https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor > /etc/apt/trusted.gpg.d/google-chrome.gpg
+#wget -qO- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /etc/apt/trusted.gpg.d/microsoft.gpg
+#wget -qO- https://mirrors.tuna.tsinghua.edu.cn/armbian/KEY.gpg | gpg --dearmor > /etc/apt/trusted.gpg.d/armbian.gpg
+curl 'https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xdf00faf1c577104b50bf1d0093d6889f9f0e78d5' |gpg --dearmor| tee /etc/apt/trusted.gpg.d/armbian.gpg
+
+apt update

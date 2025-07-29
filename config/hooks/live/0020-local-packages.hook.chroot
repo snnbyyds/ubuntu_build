@@ -1,0 +1,9 @@
+#!/bin/bash
+
+if [ -d /root/config/packages.chroot ]; then
+    for deb in /root/config/packages.chroot/*.deb; do
+        if [ -f "$deb" ]; then
+            dpkg -i "$deb" || apt-get install -f -y
+        fi
+    done
+fi

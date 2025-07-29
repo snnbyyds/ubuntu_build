@@ -1,0 +1,24 @@
+#!/bin/bash
+
+apt-get remove -y --purge \
+    gnome-games \
+    aisleriot \
+    gnome-sudoku \
+    gnome-mines \
+    gnome-mahjongg \
+    totem \
+    rhythmbox \
+    evolution \
+    thunderbird \
+    libreoffice* \
+    ubuntu-web-launchers 2>/dev/null || true
+
+apt autoremove --purge -y
+
+dpkg --get-selections | grep -v deinstall | cut -f1 > /usr/share/ubiquity/live-packages.list
+
+cat > /etc/environment.d/99-ubiquity.conf << 'ENVEOF'
+UBIQUITY_MINIMAL_INSTALL=false
+UBIQUITY_COPY_LIVE=true
+UBIQUITY_NO_RECOMMENDS=true
+ENVEOF

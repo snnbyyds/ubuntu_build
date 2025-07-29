@@ -1,0 +1,9 @@
+#!/bin/bash
+set -e
+
+apt-get purge -y snapd
+rm -rf /var/cache/snapd/
+
+apt-get purge -y ubuntu-pro-client ubuntu-advantage-tools
+apt-get autoremove -y --purge
+apt-get clean

@@ -1,0 +1,6 @@
+#!/bin/bash
+set -e
+if [ -f /etc/initramfs-tools/initramfs.conf ]; then
+  sed -i 's/^#*\s*COMPRESS=.*/COMPRESS=gzip/' /etc/initramfs-tools/initramfs.conf
+fi
+update-initramfs -u

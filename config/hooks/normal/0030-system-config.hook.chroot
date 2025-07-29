@@ -1,0 +1,28 @@
+#!/bin/bash
+
+systemctl enable systemd-resolved
+systemctl enable NetworkManager
+systemctl disable casper-md5check.service || true
+
+mkdir -p /etc/gdm3
+cat > /etc/gdm3/custom.conf << 'GDMEOF'
+[daemon]
+AutomaticLoginEnable=true
+AutomaticLogin=ubuntu
+
+[security]
+
+[xdmcp]
+
+[chooser]
+
+[debug]
+GDMEOF
+
+useradd -m -s /bin/bash -G sudo,adm,dialout,cdrom,floppy,audio,dip,video,plugdev,netdev ubuntu
+echo "ubuntu:123456" | chpasswd
+echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ubuntu-live
+echo "ubuntu-live" > /etc/hostname
+
+apt-get clean
+apt-get autoremove -y
