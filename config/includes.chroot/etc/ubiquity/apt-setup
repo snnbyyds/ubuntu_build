@@ -1,0 +1,9 @@
+#!/bin/sh
+cp -r /etc/apt/sources.list.d/* /target/etc/apt/sources.list.d/ || true
+cp -r /etc/apt/trusted.gpg.d/* /target/etc/apt/trusted.gpg.d/ || true
+
+cat > /target/etc/apt/sources.list << 'SOURCES'
+deb https://mirror.nju.edu.cn/ubuntu/ plucky main restricted universe multiverse
+deb https://mirror.nju.edu.cn/ubuntu/ plucky-updates main restricted universe multiverse
+deb https://mirror.nju.edu.cn/ubuntu/ plucky-security main restricted universe multiverse
+SOURCES

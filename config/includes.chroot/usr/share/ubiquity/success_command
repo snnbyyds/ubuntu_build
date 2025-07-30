@@ -1,0 +1,11 @@
+#!/bin/bash
+
+chroot /target systemctl enable gdm3
+chroot /target systemctl enable NetworkManager
+chroot /target systemctl enable systemd-resolved
+
+chroot /target apt-get purge -y --auto-remove ubiquity live-boot casper live-config
+chroot /target apt-get autoremove -y --purge
+chroot /target apt-get clean
+
+exit 0

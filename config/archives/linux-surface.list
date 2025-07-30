@@ -1,0 +1,1 @@
+#deb [arch=amd64 trusted=yes] https://pkg.surfacelinux.com/debian release main
