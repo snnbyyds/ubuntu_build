@@ -1,0 +1,40 @@
+#!/bin/bash
+
+lb config \
+  --distribution plucky  \
+  --archive-areas "main restricted universe multiverse" \
+  --architectures amd64 \
+  --linux-flavours generic \
+  --mode ubuntu \
+  --apt-recommends true \
+  --apt-secure false \
+  --security true \
+  --updates true \
+  --backports true \
+  --cache-packages true \
+  --source false \
+  --binary-images iso-hybrid \
+  --debian-installer live \
+  --debian-installer-distribution bookworm \
+  --parent-debian-installer-distribution bookworm \
+  --mirror-debian-installer https://mirrors.tuna.tsinghua.edu.cn/debian \
+  --parent-mirror-debian-installer https://mirrors.tuna.tsinghua.edu.cn/debian \
+  --iso-application "Ubuntu" \
+  --iso-volume "Ubuntu 25.04 Live" \
+  --iso-preparer "snnbyyds" \
+  --iso-publisher "Uotan" \
+  --mirror-bootstrap    https://mirror.nju.edu.cn/ubuntu/ \
+  --mirror-chroot       https://mirror.nju.edu.cn/ubuntu/ \
+  --mirror-binary       https://mirror.nju.edu.cn/ubuntu/ \
+  --mirror-chroot-security https://security.ubuntu.com/ubuntu/ \
+  --mirror-binary-security https://security.ubuntu.com/ubuntu/ \
+  --parent-mirror-bootstrap    https://mirror.nju.edu.cn/ubuntu/ \
+  --parent-mirror-chroot       https://mirror.nju.edu.cn/ubuntu/ \
+  --parent-mirror-chroot-security  https://mirror.nju.edu.cn/ubuntu/ \
+  --parent-mirror-binary       https://mirror.nju.edu.cn/ubuntu/ \
+  --parent-mirror-binary-security  https://mirror.nju.edu.cn/ubuntu/ \
+  --memtest memtest86+ \
+  --bootappend-live "boot=live components quiet splash noeject" \
+  --bootappend-live-failsafe "boot=live components noeject memtest noapic noapm nodma nomce nolapic nomodeset nosmp nosplash vga=normal" \
+  --bootappend-install "net.ifnames=0" \
+  --initramfs-compression gzip
