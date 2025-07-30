@@ -1,21 +1,27 @@
 #!/bin/bash
 
 # Ubuntu Minimal Desktop ISO Builder Script
-# Based on debootstrap + xorriso with full manual construction
-# Features: ubuntu-desktop-minimal, ubiquity installer, custom cleanup
+# Based on mvallim/live-custom-ubuntu-from-scratch best practices
+# Features: ubuntu-desktop-minimal, ubiquity installer, custom cleanup, UEFI-only, auto deb installation
 
 set -e  # Exit immediately on error
 
 # Configuration variables
-UBUNTU_VERSION="plucky"
-ARCH="amd64"           # Architecture, UEFI only
+UBUNTU_VERSION="plucky"  # Ubuntu 25.04 LTS, can be changed to focal, jammy, lunar, etc.
+ARCH="amd64"           # Architecture, can be changed to i386, arm64, etc.
 ISO_NAME="ubuntu-minimal-desktop-${UBUNTU_VERSION}-${ARCH}.iso"
 WORK_DIR="/tmp/ubuntu-build"
 CHROOT_DIR="${WORK_DIR}/chroot"
 ISO_DIR="${WORK_DIR}/iso"
-UBUNTU_MIRROR="http://mirror.nju.edu.cn/ubuntu"
+UBUNTU_MIRROR="http://mirrors.aliyun.com/ubuntu"
 LIVE_USER="ubuntu"
 LIVE_PASSWORD="123456"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Set non-interactive mode for all apt operations
+export DEBIAN_FRONTEND=noninteractive
+export DEBCONF_NONINTERACTIVE_SEEN=true
+export DEBCONF_PRIORITY=critical
 
 # Color output
 RED='\033[0;31m'
@@ -46,7 +52,7 @@ check_root() {
 
 # Check required dependencies
 check_dependencies() {
-    local deps=("debootstrap" "xorriso" "squashfs-tools" "grub-efi-amd64-bin")
+    local deps=("debootstrap" "xorriso" "squashfs-tools" "grub-efi-amd64-bin" "grub-common")
     local missing=()
     
     for dep in "${deps[@]}"; do
@@ -60,6 +66,21 @@ check_dependencies() {
         log "Installing missing dependencies..."
         apt update
         DEBIAN_FRONTEND=noninteractive apt install -y "${missing[@]}"
+    fi
+}
+
+# Check for custom deb packages in script directory
+check_custom_debs() {
+    local deb_files=("$SCRIPT_DIR"/*.deb)
+    if [[ -e "${deb_files[0]}" ]]; then
+        log "Found custom deb packages in script directory:"
+        for deb in "${deb_files[@]}"; do
+            log "  - $(basename "$deb")"
+        done
+        return 0
+    else
+        log "No custom deb packages found in script directory"
+        return 1
     fi
 }
 
@@ -112,24 +133,70 @@ umount_filesystems() {
     umount -l "$CHROOT_DIR/dev" 2>/dev/null || true
 }
 
-# Install local deb packages from script directory
-install_local_debs() {
-    log "Installing local deb packages from script directory..."
-    local script_dir=$(dirname "$0")
-    local deb_files=("$script_dir"/*.deb)
+# Configure debconf for non-interactive mode (following mvallim approach)
+configure_debconf() {
+    log "Configuring debconf for non-interactive mode..."
     
-    if [[ -n "$(ls "$script_dir"/*.deb 2>/dev/null)" ]]; then
-        for deb in "${deb_files[@]}"; do
-            log "Installing $deb"
-            cp "$deb" "$CHROOT_DIR/tmp/"
-            deb_name=$(basename "$deb")
-            chroot "$CHROOT_DIR" dpkg -i "/tmp/$deb_name"
-            rm "$CHROOT_DIR/tmp/$deb_name"
-        done
-        DEBIAN_FRONTEND=noninteractive chroot "$CHROOT_DIR" apt-get install -f -y
-    else
-        log "No local deb packages found in $script_dir"
-    fi
+    # Set debconf to non-interactive mode inside chroot
+    cat > "$CHROOT_DIR/etc/apt/apt.conf.d/99noninteractive" << EOF
+APT::Get::Assume-Yes "true";
+APT::Get::force-yes "true";
+Dpkg::Options "--force-confdef";
+Dpkg::Options "--force-confold";
+EOF
+
+    # Create policy file to prevent service starts during package installation
+    cat > "$CHROOT_DIR/usr/sbin/policy-rc.d" << EOF
+#!/bin/sh
+exit 101
+EOF
+    chmod +x "$CHROOT_DIR/usr/sbin/policy-rc.d"
+
+    # Configure debconf selections before package installation
+    chroot "$CHROOT_DIR" debconf-set-selections << EOF
+# Locales
+locales locales/locales_to_be_generated multiselect en_US.UTF-8 UTF-8
+locales locales/default_environment_locale select en_US.UTF-8
+
+# Keyboard configuration
+keyboard-configuration keyboard-configuration/layout select English (US)
+keyboard-configuration keyboard-configuration/layoutcode string us
+keyboard-configuration keyboard-configuration/model select Generic 105-key PC (intl.)
+keyboard-configuration keyboard-configuration/modelcode string pc105
+keyboard-configuration keyboard-configuration/variant select English (US)
+keyboard-configuration keyboard-configuration/variantcode string
+
+# Console setup
+console-setup console-setup/charmap47 select UTF-8
+console-setup console-setup/codeset47 select # Latin1 and Latin5 - western Europe and Turkic languages
+console-setup console-setup/codesetcode string Lat15
+console-setup console-setup/fontface47 select Fixed
+console-setup console-setup/fontsize-fb47 select 16
+console-setup console-setup/fontsize-text47 select 16
+
+# Timezone
+tzdata tzdata/Areas select Etc
+tzdata tzdata/Zones/Etc select UTC
+
+# GRUB - don't install to MBR, we handle this manually
+grub-pc grub-pc/install_devices_empty boolean true
+grub-pc grub-pc/install_devices_disks_changed multiselect
+
+# GDM3
+gdm3 shared/default-x-display-manager select gdm3
+gdm3 gdm3/daemon_name string /usr/sbin/gdm3
+
+# Postfix
+postfix postfix/main_mailer_type select No configuration
+postfix postfix/mailname string ubuntu-minimal.local
+
+# Ubiquity
+ubiquity ubiquity/summary note
+ubiquity ubiquity/reboot boolean true
+
+# resolvconf
+resolvconf resolvconf/linkify-resolvconf boolean false
+EOF
 }
 
 # Configure base system
@@ -138,6 +205,7 @@ configure_system() {
     
     # Configure DNS
     echo "nameserver 8.8.8.8" > "$CHROOT_DIR/etc/resolv.conf"
+    echo "nameserver 1.1.1.1" >> "$CHROOT_DIR/etc/resolv.conf"
     
     # Configure sources.list
     cat > "$CHROOT_DIR/etc/apt/sources.list" << EOF
@@ -147,51 +215,115 @@ deb $UBUNTU_MIRROR $UBUNTU_VERSION-security main restricted universe multiverse
 deb $UBUNTU_MIRROR $UBUNTU_VERSION-backports main restricted universe multiverse
 EOF
 
-    # Update package lists
-    DEBIAN_FRONTEND=noninteractive chroot "$CHROOT_DIR" apt update
+    # Configure debconf for non-interactive mode
+    configure_debconf
     
-    # Install kernel and essential packages
+    # Update package lists
+    log "Updating package lists..."
+    chroot "$CHROOT_DIR" /bin/bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        export DEBCONF_NONINTERACTIVE_SEEN=true
+        export DEBCONF_PRIORITY=critical
+        apt update
+    "
+    
+    # Install kernel and essential packages (without grub-pc to avoid conflicts)
     log "Installing kernel and essential packages..."
-    DEBIAN_FRONTEND=noninteractive chroot "$CHROOT_DIR" apt install -y \
-        linux-image-generic \
-        linux-headers-generic \
-        grub-efi-amd64 \
-        systemd \
-        networkd-dispatcher \
-        systemd-resolved \
-        sudo \
-        openssh-server \
-        nano \
-        curl \
-        wget \
-        ca-certificates \
-        locales \
-        tzdata \
-        casper \
-        discover \
-        laptop-detect \
-        os-prober
+    chroot "$CHROOT_DIR" /bin/bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        export DEBCONF_NONINTERACTIVE_SEEN=true
+        export DEBCONF_PRIORITY=critical
+        apt install -y \
+            linux-image-generic \
+            linux-headers-generic \
+            systemd \
+            systemd-sysv \
+            networkd-dispatcher \
+            sudo \
+            ssh \
+            nano \
+            curl \
+            wget \
+            ca-certificates \
+            locales \
+            tzdata \
+            casper \
+            discover \
+            laptop-detect \
+            os-prober \
+            keyboard-configuration \
+            console-setup \
+            htop \
+            tree \
+            laptop-detect \
+            ubuntu-standard
+    "
+
+    chroot "$CHROOT_DIR" /bin/bash -c "
+        wget https://mirrors.tuna.tsinghua.edu.cn/armbian/pool/main/f/fake-ubuntu-advantage-tools/fake-ubuntu-advantage-tools_25.5.2_all__1-B34ac-R448a.deb -O /tmp/fake.deb
+        apt install /tmp/fake.deb
+        rm /tmp/fake.deb
+    "
     
     # Install desktop environment
     log "Installing ubuntu-desktop-minimal..."
-    DEBIAN_FRONTEND=noninteractive chroot "$CHROOT_DIR" apt install -y ubuntu-desktop-minimal
+    chroot "$CHROOT_DIR" /bin/bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        export DEBCONF_NONINTERACTIVE_SEEN=true
+        export DEBCONF_PRIORITY=critical
+        apt install -y \
+            ubuntu-desktop-minimal \
+            gdm3 \
+            gnome-shell \
+            gnome-shell-extension-appindicator \
+            gnome-shell-extension-desktop-icons-ng \
+            gnome-shell-extension-ubuntu-dock \
+            gnome-shell-extension-ubuntu-tiling-assistant \
+            gnome-terminal \
+            ibus-libpinyin \
+            ibus-pinyin
+    "
     
-    # Install ubiquity installer
+    # Install ubiquity installer (this will install grub-pc as dependency)
     log "Installing ubiquity installer..."
-    DEBIAN_FRONTEND=noninteractive chroot "$CHROOT_DIR" apt install -y \
-        ubiquity \
-        ubiquity-casper \
-        ubiquity-frontend-gtk \
-        ubiquity-slideshow-ubuntu \
-        ubiquity-ubuntu-artwork
+    chroot "$CHROOT_DIR" /bin/bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        export DEBCONF_NONINTERACTIVE_SEEN=true
+        export DEBCONF_PRIORITY=critical
+        apt install -y \
+            ubiquity \
+            ubiquity-casper \
+            ubiquity-frontend-gtk \
+            ubiquity-slideshow-ubuntu \
+            ubiquity-ubuntu-artwork
+    "
     
     # Configure locale and timezone
-    chroot "$CHROOT_DIR" locale-gen en_US.UTF-8
+    log "Configuring locale and timezone..."
+    chroot "$CHROOT_DIR" /bin/bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        locale-gen en_US.UTF-8
+        update-locale LANG=en_US.UTF-8
+        dpkg-reconfigure -f noninteractive locales
+        dpkg-reconfigure -f noninteractive tzdata
+    "
+    
     echo 'LANG=en_US.UTF-8' > "$CHROOT_DIR/etc/default/locale"
     ln -sf /usr/share/zoneinfo/UTC "$CHROOT_DIR/etc/localtime"
     
     # Configure hostname
     echo "ubuntu-minimal" > "$CHROOT_DIR/etc/hostname"
+    cat > "$CHROOT_DIR/etc/hosts" << EOF
+127.0.0.1       localhost
+127.0.1.1       ubuntu-minimal
+
+# The following lines are desirable for IPv6 capable hosts
+::1     ip6-localhost ip6-loopback
+fe00::0 ip6-localnet
+ff00::0 ip6-mcastprefix
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+EOF
     
     # Configure network with netplan
     mkdir -p "$CHROOT_DIR/etc/netplan"
@@ -212,20 +344,17 @@ EOF
     
     # Configure sudo without password for live user
     echo "$LIVE_USER ALL=(ALL) NOPASSWD:ALL" > "$CHROOT_DIR/etc/sudoers.d/$LIVE_USER"
+    chmod 440 "$CHROOT_DIR/etc/sudoers.d/$LIVE_USER"
     
-    # Enable autologin for live session
-    mkdir -p "$CHROOT_DIR/etc/systemd/system/getty@tty1.service.d"
-    cat > "$CHROOT_DIR/etc/systemd/system/getty@tty1.service.d/autologin.conf" << EOF
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty --autologin $LIVE_USER --noclear %I \$TERM
-EOF
-
     # Configure GDM for autologin
+    mkdir -p "$CHROOT_DIR/etc/gdm3"
     cat > "$CHROOT_DIR/etc/gdm3/custom.conf" << EOF
 [daemon]
 AutomaticLoginEnable=true
 AutomaticLogin=$LIVE_USER
+TimedLoginEnable=true
+TimedLogin=$LIVE_USER
+TimedLoginDelay=0
 
 [security]
 
@@ -235,6 +364,67 @@ AutomaticLogin=$LIVE_USER
 
 [debug]
 EOF
+
+    cat >> /etc/sysctl.conf << 'EOF'
+vm.swappiness=1
+vm.vfs_cache_pressure=50
+vm.dirty_background_ratio=1
+vm.dirty_ratio=50
+kernel.nmi_watchdog=0
+net.ipv4.tcp_congestion_control=bbr
+EOF
+
+    chroot "$CHROOT_DIR" systemctl disable casper-md5check.service
+
+    # Enable necessary services
+    chroot "$CHROOT_DIR" systemctl enable systemd-networkd
+    chroot "$CHROOT_DIR" systemctl enable systemd-resolved
+    chroot "$CHROOT_DIR" systemctl enable NetworkManager
+    chroot "$CHROOT_DIR" systemctl enable gdm3
+
+    log "Configuring display manager..."
+    chroot "$CHROOT_DIR" /bin/bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        systemctl enable gdm3 2>/dev/null || true
+        systemctl set-default graphical.target 2>/dev/null || true
+    "
+    
+    # Remove policy-rc.d to allow services to start normally after installation
+    rm -f "$CHROOT_DIR/usr/sbin/policy-rc.d"
+}
+
+# Install custom deb packages from script directory
+install_custom_debs() {
+    if check_custom_debs; then
+        log "Installing custom deb packages..."
+        
+        # Create temporary directory for debs
+        mkdir -p "$CHROOT_DIR/tmp/custom-debs"
+        
+        # Copy all deb files to chroot
+        cp "$SCRIPT_DIR"/*.deb "$CHROOT_DIR/tmp/custom-debs/" 2>/dev/null || true
+        
+        # Install each deb package
+        for deb in "$CHROOT_DIR/tmp/custom-debs"/*.deb; do
+            if [[ -f "$deb" ]]; then
+                local deb_name=$(basename "$deb")
+                log "Installing custom package: $deb_name"
+                
+                chroot "$CHROOT_DIR" /bin/bash -c "
+                    export DEBIAN_FRONTEND=noninteractive
+                    export DEBCONF_NONINTERACTIVE_SEEN=true
+                    export DEBCONF_PRIORITY=critical
+                    dpkg -i /tmp/custom-debs/$deb_name || true
+                    apt-get install -f -y
+                "
+            fi
+        done
+        
+        # Clean up temporary directory
+        rm -rf "$CHROOT_DIR/tmp/custom-debs"
+        
+        log "Custom deb packages installation completed"
+    fi
 }
 
 # Install Google Chrome
@@ -242,13 +432,21 @@ install_google_chrome() {
     log "Installing Google Chrome..."
     
     # Add Google Chrome repository
-    chroot "$CHROOT_DIR" sh -c 'curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome-keyring.gpg'
+    chroot "$CHROOT_DIR" /bin/bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome-keyring.gpg
+    "
     
     echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > "$CHROOT_DIR/etc/apt/sources.list.d/google-chrome.list"
     
     # Update and install Chrome
-    DEBIAN_FRONTEND=noninteractive chroot "$CHROOT_DIR" apt update
-    DEBIAN_FRONTEND=noninteractive chroot "$CHROOT_DIR" apt install -y google-chrome-stable
+    chroot "$CHROOT_DIR" /bin/bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        export DEBCONF_NONINTERACTIVE_SEEN=true
+        export DEBCONF_PRIORITY=critical
+        apt update
+        apt install -y google-chrome-stable
+    "
 }
 
 # Remove unwanted software (bloatware cleanup)
@@ -257,28 +455,7 @@ cleanup_bloatware() {
     
     # List of packages to remove
     local unwanted_packages=(
-        "libreoffice*"
-        "thunderbird*"
-        "rhythmbox*"
-        "totem*"
-        "cheese*"
-        "remmina*"
-        "transmission-gtk"
-        "shotwell*"
-        "simple-scan"
-        "gnome-mahjongg"
-        "gnome-mines"
-        "gnome-sudoku"
-        "aisleriot"
-        "gnome-todo"
-        "evolution*"
-        "gnome-contacts"
-        "gnome-maps"
-        "gnome-weather"
-        "ubuntu-web-launchers"
-        "ubuntu-advantage-tools"
-        "ubuntu-pro-client"
-        "snapd"
+        "gnome-accessibility-themes"
         "gnome-bluetooth-sendto"
         "gnome-initial-setup"
         "gnome-font-viewer"
@@ -295,24 +472,49 @@ cleanup_bloatware() {
         "whoopsie"
         "firefox"
         "cloud-init"
+        "ubuntu-pro-client"
+        "ubuntu-advantage-tools"
     )
     
     log "Removing unwanted packages..."
     for package in "${unwanted_packages[@]}"; do
-        DEBIAN_FRONTEND=noninteractive chroot "$CHROOT_DIR" apt purge -y "$package" 2>/dev/null || true
+        chroot "$CHROOT_DIR" /bin/bash -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt purge -y $package 2>/dev/null || true
+        "
     done
     
     # Remove orphaned packages
-    DEBIAN_FRONTEND=noninteractive chroot "$CHROOT_DIR" apt autoremove -y
+    chroot "$CHROOT_DIR" /bin/bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        apt autoremove -y
+    "
     
     # Clean package cache
-    chroot "$CHROOT_DIR" apt autoclean
+    chroot "$CHROOT_DIR" /bin/bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        apt autoclean
+    "
     
     log "Bloatware cleanup completed"
 }
 
-# Configure live system for consistency with installed system
+# Configure live system
 configure_live_system() {
+    # Make sure ubiquity is installed
+    log "Installing ubiquity installer..."
+    chroot "$CHROOT_DIR" /bin/bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        export DEBCONF_NONINTERACTIVE_SEEN=true
+        export DEBCONF_PRIORITY=critical
+        apt install -y \
+            ubiquity \
+            ubiquity-casper \
+            ubiquity-frontend-gtk \
+            ubiquity-slideshow-ubuntu \
+            ubiquity-ubuntu-artwork
+    "
+
     log "Configuring live system for consistency..."
     
     # Create casper configuration
@@ -340,6 +542,8 @@ StartupNotify=true
 EOF
 
     chmod +x "$CHROOT_DIR/home/$LIVE_USER/Desktop/ubiquity.desktop"
+    
+    # Set proper permissions for user directory
     chroot "$CHROOT_DIR" chown -R "$LIVE_USER:$LIVE_USER" "/home/$LIVE_USER"
     
     # Configure ubiquity for consistent installation
@@ -349,102 +553,16 @@ EOF
 default_keyboard_layout=us
 default_keyboard_variant=
 migrate=true
+automatic=false
 EOF
 
-    # Create script to ensure consistency between live and installed system
-    cat > "$CHROOT_DIR/usr/local/bin/post-install-cleanup.sh" << 'EOF'
-#!/bin/bash
-# Post-installation cleanup to match live system
-
-# Remove the same bloatware packages
-UNWANTED_PACKAGES=(
-    "libreoffice*"
-    "thunderbird*"
-    "rhythmbox*"
-    "totem*"
-    "cheese*"
-    "remmina*"
-    "transmission-gtk"
-    "shotwell*"
-    "simple-scan"
-    "gnome-mahjongg"
-    "gnome-mines"
-    "gnome-sudoku"
-    "aisleriot"
-    "gnome-todo"
-    "evolution*"
-    "gnome-contacts"
-    "gnome-maps"
-    "gnome-weather"
-    "ubuntu-web-launchers"
-    "ubuntu-advantage-tools"
-    "ubuntu-pro-client"
-    "snapd"
-    "gnome-bluetooth-sendto"
-    "gnome-initial-setup"
-    "gnome-font-viewer"
-    "gnome-clocks"
-    "gnome-logs"
-    "gnome-remote-desktop"
-    "gnome-system-monitor"
-    "gnome-text-editor"
-    "printer-driver-*"
-    "papers"
-    "orca"
-    "packagekit"
-    "avahi-daemon"
-    "whoopsie"
-    "firefox"
-    "cloud-init"
-)
-
-for package in "${UNWANTED_PACKAGES[@]}"; do
-    apt purge -y "$package" 2>/dev/null || true
-done
-
-apt autoremove -y
-apt autoclean
-
-# Ensure Google Chrome is installed
-if ! command -v google-chrome &> /dev/null; then
-    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome-keyring.gpg
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
-    apt update
-    apt install -y google-chrome-stable
-fi
-EOF
-
-    chmod +x "$CHROOT_DIR/usr/local/bin/post-install-cleanup.sh"
-    
-    # Configure ubiquity to run post-install script
-    cat > "$CHROOT_DIR/usr/share/ubiquity/plugininstall.py" << 'EOF'
-#!/usr/bin/python3
-
-import subprocess
-import sys
-import os
-
-def run_post_install_cleanup():
-    """Run post-installation cleanup script"""
-    try
-        subprocess.run(['/usr/local/bin/post-install-cleanup.sh'], check=True)
-        print("Post-installation cleanup completed successfully")
-    except subprocess.CalledProcessError as e:
-        print(f"Post-installation cleanup failed: {e}")
-
-if __name__ == "__main__":
-    run_post_install_cleanup()
-EOF
-
-    chmod +x "$CHROOT_DIR/usr/share/ubiquity/plugininstall.py"
-    
     # Update initramfs with casper
     chroot "$CHROOT_DIR" update-initramfs -u
     
     log "Live system configuration completed"
 }
 
-# Create ISO directory structure
+# Create ISO directory structure (following mvallim approach)
 create_iso_structure() {
     log "Creating ISO directory structure..."
     
@@ -460,7 +578,8 @@ create_iso_structure() {
         -e boot \
         -comp xz \
         -Xbcj x86 \
-        -b 1048576
+        -b 1048576 \
+        -processors $(nproc)
     
     # Create filesystem.size
     echo -n $(du -sx --block-size=1 "$CHROOT_DIR" | cut -f1) > "$ISO_DIR/casper/filesystem.size"
@@ -477,6 +596,7 @@ EOF
     echo "$UBUNTU_VERSION" > "$ISO_DIR/.disk/release"
     echo "Ubuntu Minimal Desktop" > "$ISO_DIR/.disk/casper-uuid-generic"
     echo "Ubuntu" > "$ISO_DIR/.disk/base_installable"
+    touch "$ISO_DIR/.disk/casper-uuid-generic"
     
     # Create README for the ISO
     cat > "$ISO_DIR/README.diskdefines" << EOF
@@ -492,103 +612,98 @@ EOF
 EOF
 }
 
-# Create GRUB configuration (UEFI only)
+# Create GRUB configuration (following mvallim approach)
 create_grub_config() {
-    log "Creating GRUB configuration for UEFI..."
+    log "Creating GRUB configuration..."
     
-    cat > "$ISO_DIR/boot/grub/grub.cfg" << 'EOF'
+    # Create grub.cfg with proper UEFI configuration
+    cat > "$ISO_DIR/boot/grub/grub.cfg" << EOF
+search --no-floppy --set=root -l 'Ubuntu Minimal Desktop'
+
+insmod all_video
+
 set default="0"
-set timeout=10
+set timeout=30
 
-insmod efi_gop
-insmod efi_uga
-insmod video_bochs
-insmod video_cirrus
-insmod gzio
-insmod part_gpt
-insmod fat
-insmod iso9660
-
-set gfxpayload=keep
-insmod gfxterm
-set gfxmode=auto
-
-terminal_output gfxterm
-
-menuentry "Try Ubuntu Minimal Desktop without installing" {
-    linux /casper/vmlinuz boot=casper quiet splash ---
-    initrd /casper/initrd
+menuentry "Try Ubuntu without installing" {
+   linux /casper/vmlinuz boot=casper maybe-ubiquity quiet splash ---
+   initrd /casper/initrd
 }
 
-menuentry "Install Ubuntu Minimal Desktop" {
-    linux /casper/vmlinuz boot=casper only-ubiquity quiet splash ---
-    initrd /casper/initrd
+menuentry "Install Ubuntu" {
+   linux /casper/vmlinuz boot=casper only-ubiquity quiet splash ---
+   initrd /casper/initrd
 }
 
-menuentry "Try Ubuntu Minimal Desktop (safe graphics)" {
-    linux /casper/vmlinuz boot=casper quiet splash nomodeset ---
-    initrd /casper/initrd
+menuentry "OEM install (for manufacturers)" {
+   linux /casper/vmlinuz boot=casper only-ubiquity quiet splash oem-config/enable=true ---
+   initrd /casper/initrd
 }
 
 menuentry "Check disc for defects" {
-    linux /casper/vmlinuz boot=casper integrity-check quiet splash ---
-    initrd /casper/initrd
+   linux /casper/vmlinuz boot=casper integrity-check quiet splash ---
+   initrd /casper/initrd
 }
 EOF
 
-    # Create loopback.cfg for ISO booting
-    cat > "$ISO_DIR/boot/grub/loopback.cfg" << 'EOF'
-menuentry "Try Ubuntu Minimal Desktop without installing" {
-    linux /casper/vmlinuz boot=casper iso-scan/filename=${iso_path} quiet splash ---
-    initrd /casper/initrd
-}
-EOF
-}
-
-# Generate ISO file (UEFI only)
-generate_iso() {
-    log "Generating ISO file for UEFI..."
+    # Create font for GRUB
+    if [[ -f /usr/share/grub/unicode.pf2 ]]; then
+        cp /usr/share/grub/unicode.pf2 "$ISO_DIR/boot/grub/font.pf2"
+    fi
     
-    # Create EFI boot image
+    # Create loopback.cfg for ISO booting from grub menu
+    cat > "$ISO_DIR/boot/grub/loopback.cfg" << 'EOF'
+menuentry "Try Ubuntu without installing" {
+    linux /casper/vmlinuz boot=casper iso-scan/filename=${iso_path} maybe-ubiquity quiet splash ---
+    initrd /casper/initrd
+}
+EOF
+}
+
+# Generate ISO file (UEFI-only approach following mvallim)
+generate_iso() {
+    log "Generating UEFI-only ISO file..."
+    
+    # Create El Torito boot catalog
+    # Create grubx64.efi bootloader
+    grub-mkstandalone \
+        --format=x86_64-efi \
+        --output="$ISO_DIR/boot/grub/grubx64.efi" \
+        --locales="" \
+        --fonts="" \
+        "boot/grub/grub.cfg=$ISO_DIR/boot/grub/grub.cfg"
+    
+    # Create bootable EFI image
     dd if=/dev/zero of="$ISO_DIR/boot/grub/efiboot.img" bs=1M count=20
     mkfs.fat -F 16 "$ISO_DIR/boot/grub/efiboot.img"
     
-    # Mount EFI image and copy GRUB
+    # Mount EFI image and setup boot structure
     mkdir -p /tmp/efi-mount
     mount -o loop "$ISO_DIR/boot/grub/efiboot.img" /tmp/efi-mount
     mkdir -p /tmp/efi-mount/EFI/BOOT
     
-    # Check for GRUB EFI bootloader files
-    if [[ "$ARCH" == "amd64" ]]; then
-        if [[ -f /usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed ]]; then
-            log "Using signed GRUB EFI bootloader"
-            cp /usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed /tmp/efi-mount/EFI/BOOT/bootx64.efi
-        elif [[ -f /usr/lib/grub/x86_64-efi/grubx64.efi ]]; then
-            log "Using standard GRUB EFI bootloader"
-            cp /usr/lib/grub/x86_64-efi/grubx64.efi /tmp/efi-mount/EFI/BOOT/bootx64.efi
-        else
-            error "No GRUB EFI bootloader found. Please ensure grub-efi-amd64-bin or grub-efi-amd64-signed is installed."
-        fi
-    fi
+    # Copy grub bootloader to EFI partition
+    cp "$ISO_DIR/boot/grub/grubx64.efi" /tmp/efi-mount/EFI/BOOT/bootx64.efi
     
-    cp "$ISO_DIR/boot/grub/grub.cfg" /tmp/efi-mount/EFI/BOOT/grub.cfg
+    # Copy grub config to EFI partition
+    mkdir -p /tmp/efi-mount/boot/grub
+    cp "$ISO_DIR/boot/grub/grub.cfg" /tmp/efi-mount/boot/grub/
     
     umount /tmp/efi-mount
     rmdir /tmp/efi-mount
-    echo 114514
     
-    # Create ISO using xorriso (UEFI only)
+    # Create ISO using xorriso with proper UEFI support
     xorriso -as mkisofs \
         -iso-level 3 \
         -full-iso9660-filenames \
-        -volid "Ubuntu-Minimal-Desktop" \
+        -volid "Ubuntu Minimal Desktop" \
+        -output "$ISO_NAME" \
         -eltorito-alt-boot \
         -e boot/grub/efiboot.img \
         -no-emul-boot \
         -append_partition 2 0xef "$ISO_DIR/boot/grub/efiboot.img" \
-        -output "$ISO_NAME" \
-        -graft-points \
-            "$ISO_DIR"
+        -m "boot/grub/efiboot.img" \
+        "$ISO_DIR"
 }
 
 # Final system cleanup
@@ -596,8 +711,11 @@ final_cleanup() {
     log "Performing final system cleanup..."
     
     # Clean package cache
-    chroot "$CHROOT_DIR" apt clean
-    DEBIAN_FRONTEND=noninteractive chroot "$CHROOT_DIR" apt autoremove -y
+    chroot "$CHROOT_DIR" /bin/bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        apt clean
+        apt autoremove -y
+    "
     
     # Remove temporary files
     rm -f "$CHROOT_DIR/etc/resolv.conf"
@@ -609,6 +727,9 @@ final_cleanup() {
     # Clear bash history
     rm -f "$CHROOT_DIR/root/.bash_history"
     rm -f "$CHROOT_DIR/home/$LIVE_USER/.bash_history"
+    
+    # Remove machine-id (will be regenerated on first boot)
+    truncate -s 0 "$CHROOT_DIR/etc/machine-id"
     
     log "Final cleanup completed"
 }
@@ -622,7 +743,7 @@ cleanup() {
 
 # Main function
 main() {
-    log "Starting Ubuntu Minimal Desktop ISO build..."
+    log "Starting Ubuntu Minimal Desktop ISO build (UEFI-only)..."
     
     check_root
     check_dependencies
@@ -634,8 +755,8 @@ main() {
     create_base_system
     mount_filesystems
     configure_system
-    install_local_debs
     install_google_chrome
+    install_custom_debs
     cleanup_bloatware
     configure_live_system
     final_cleanup
